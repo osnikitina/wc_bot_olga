@@ -4,6 +4,7 @@ import requests
 import csv
 import io
 from datetime import datetime
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,6 +25,7 @@ GOOGLE_SHEETS_CSV_URL = (
     "/export?format=csv&gid=0"
 )
 DB_NAME = "bot.db"
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 MATCHES_PER_PAGE = 7
 ADMIN_ID = 156845213
@@ -95,6 +97,8 @@ async def guard(update, context):
 def get_db():
     return sqlite3.connect(DB_NAME)
 
+def now_moscow():
+    return datetime.now(MOSCOW_TZ)
 
 def init_db():
     conn = get_db()
@@ -369,7 +373,6 @@ async def choose_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["match_id"] = mid
     await q.message.reply_text("Введи прогноз в формате: 2-1")
 
-
 # ---------- СОХРАНЕНИЕ ПРОГНОЗА ----------
 async def save_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await guard(update, context): return
@@ -387,10 +390,33 @@ async def save_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_db()
     cur = conn.cursor()
+
+    # 🔥 ДОБАВЛЯЕМ ПРОВЕРКУ ВРЕМЕНИ
+    cur.execute("SELECT match_time FROM matches WHERE match_id = ?", (mid,))
+    row = cur.fetchone()
+
+    if not row:
+        await update.message.reply_text("Матч не найден")
+        conn.close()
+        return
+
+    match_time = datetime.strptime(row[0], TIME_FORMAT)
+    match_time = MOSCOW_TZ.localize(match_time)
+
+    if match_time <= now_moscow():
+        await update.message.reply_text(
+            "⛔ Матч уже начался.\n"
+            "Прогноз не принят — будет начислен минимальный балл."
+        )
+        conn.close()
+        return
+
+    # ✅ ЕСЛИ ВСЁ ОК — СОХРАНЯЕМ
     cur.execute("""
         INSERT OR REPLACE INTO predictions (user_id, match_id, home_score, away_score)
         VALUES (?, ?, ?, ?)
     """, (update.message.from_user.id, mid, home, away))
+
     conn.commit()
     conn.close()
 
@@ -400,6 +426,7 @@ async def save_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Прогноз сохранён!",
         reply_markup=main_menu(update.message.from_user.id)
     )
+
 
 
 # ---------- МОИ ПРОГНОЗЫ ----------
