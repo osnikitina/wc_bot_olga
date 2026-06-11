@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, time, timedelta
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,6 +30,8 @@ TIME_FORMAT = "%Y-%m-%d %H:%M"
 MATCHES_PER_PAGE = 7
 ADMIN_ID = 156845213
 BACKUP_CHAT_ID = -1003647629033
+REMINDER_TIME_MSK = "12:00"
+REMINDER_WINDOW_HOURS = 25
 # =============================================
 
 
@@ -95,6 +97,78 @@ async def guard(update, context):
     if not is_authorized(update.effective_user.id):
         return True
     return False
+
+# -------REMINDER------------
+async def send_daily_reminders(app):
+    print("send_daily_reminders started")
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    now = datetime.now(MOSCOW_TZ)
+    window_end = now + timedelta(hours=REMINDER_WINDOW_HOURS)
+
+    # берем матчи в окне
+    cur.execute("""
+        SELECT match_id, team_home, team_away, match_time
+        FROM matches
+        WHERE finished = 0
+    """)
+
+    matches = cur.fetchall()
+
+    # фильтруем по времени (Москва!)
+    upcoming = []
+    for mid, th, ta, mt in matches:
+        match_dt = MOSCOW_TZ.localize(datetime.strptime(mt, TIME_FORMAT))
+
+        if now <= match_dt <= window_end:
+            upcoming.append((mid, th, ta, mt))
+
+    if not upcoming:
+        conn.close()
+        return
+
+    # все пользователи
+    cur.execute("SELECT user_id FROM users WHERE is_authorized=1")
+    users = [u[0] for u in cur.fetchall()]
+
+    for uid in users:
+
+        # проверяем: есть ли у пользователя все ставки
+        need_reminder = False
+
+        for mid, th, ta, mt in upcoming:
+            cur.execute("""
+                SELECT 1 FROM predictions
+                WHERE user_id=? AND match_id=?
+            """, (uid, mid))
+
+            if not cur.fetchone():
+                need_reminder = True
+                break
+
+        if not need_reminder:
+            continue
+
+        text = "⏰ Напоминание о ставках!\n\n⚽ Ближайшие матчи:\n\n"
+
+        for mid, th, ta, mt in upcoming:
+            cur.execute("""
+                SELECT 1 FROM predictions
+                WHERE user_id=? AND match_id=?
+            """, (uid, mid))
+
+            status = "✅" if cur.fetchone() else "❌ НЕ СДЕЛАНА"
+            text += f"{th} – {ta} ({format_match_time(mt)}) → {status}\n"
+
+        try:
+            await app.bot.send_message(chat_id=uid, text=text)
+        except Exception as e:
+            print(f"reminder error for {uid}: {e}")
+
+    conn.close()
+    print("send_daily_reminders conpleted")
 
 # -----------GENERATE PREDICTIONS IN CSV-------
 async def export_bets_core():
@@ -947,7 +1021,14 @@ def main():
     app.add_handler(CallbackQueryHandler(rating, pattern="^rating$"))
     app.add_handler(CallbackQueryHandler(sync_handler, pattern="^sync$"))
     app.add_handler(CallbackQueryHandler(export_bets, pattern="^export_bets$"))
-    print("🤖 Бот запущен и ждёт события...")
+    
+    rem_h, rem_m = map(int, REMINDER_TIME_MSK.split(":"))
+
+    app.job_queue.run_daily(
+        send_daily_reminders,
+        time=time(hour=rem_h, minute=rem_m, tzinfo=MOSCOW_TZ),
+    )
+
     app.run_polling()
 
 
