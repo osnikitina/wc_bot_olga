@@ -34,6 +34,9 @@ BACKUP_CHAT_ID = -1003647629033
 
 
 # ---------- УТИЛИТЫ ----------
+def now_moscow_str():
+    return datetime.now(MOSCOW_TZ).strftime(TIME_FORMAT)
+
 def get_display_name(user):
     return f"@{user.username}" if user.username else (user.first_name or "игрок")
 
@@ -285,6 +288,10 @@ def sync_matches_from_google():
         home_score = row["home_score"].strip()
         away_score = row["away_score"].strip()
         finished = 1 if home_score and away_score else 0
+        
+        raw = row["match_time"].strip()
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+        match_time = dt.strftime("%Y-%m-%d %H:%M")
 
         cur.execute("""
             INSERT OR REPLACE INTO matches
@@ -294,7 +301,7 @@ def sync_matches_from_google():
             int(row["match_id"]),
             row["team_home"],
             row["team_away"],
-            row["match_time"],
+            match_time,
             int(home_score) if home_score else None,
             int(away_score) if away_score else None,
             finished
@@ -450,9 +457,10 @@ async def show_all_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    WHERE p.match_id = m.match_id AND p.user_id = ?
                )
         FROM matches m
+        WHERE m.match_time >= ?
         ORDER BY m.match_time
         LIMIT ? OFFSET ?
-    """, (q.from_user.id, MATCHES_PER_PAGE, offset))
+    """, (q.from_user.id, now_moscow_str(), MATCHES_PER_PAGE, offset))
 
     rows = cur.fetchall()
     conn.close()
@@ -484,7 +492,12 @@ async def show_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT date(match_time) FROM matches ORDER BY date(match_time)")
+    cur.execute("""
+        SELECT DISTINCT date(match_time)
+        FROM matches
+        WHERE match_time >= ?
+        ORDER BY date(match_time)
+    """, (now_moscow_str(),))
     dates = cur.fetchall()
     conn.close()
 
@@ -729,7 +742,7 @@ async def my_results_matches(update: Update, context: ContextTypes.DEFAULT_TYPE)
     rows = cur.fetchall()
 
 
-    text = "📊 Твои матчи и очки:\n\n"
+    text = "📊 Твои матчи и очки:\n\n<pre>"
     keyboard = []
 
     for i, r in enumerate(rows, 1):
@@ -745,15 +758,32 @@ async def my_results_matches(update: Update, context: ContextTypes.DEFAULT_TYPE)
         hp_text = f"{hp}" if hp is not None else "-"
         ap_text = f"{ap}" if ap is not None else "-"
 
-        text += f"{i}. {th} – {ta}\nТвой прогноз: {hp_text}-{ap_text}\nРезультат: {hr}-{ar} {icon}\nОчки: {pts} (из них {bonus_pts} бонусы)\n\n"
+        #text += f"{i}. {th} – {ta}\nТвой прогноз: {hp_text}-{ap_text}\nРезультат: {hr}-{ar} {icon}\nОчки: {pts} (из них {bonus_pts} бонусы)\n\n"
+        t_name = f"{th} – {ta}"
+        t_name = t_name.ljust(42)
+        
+        t_pred = f"🎯{hp_text}-{ap_text}"
+        t_pred = t_pred.ljust(7)
+        
+        t_act = f"⚽️{hr}-{ar}"
+        t_act = t_act.ljust(7)
+        
+        t_total = f"⭐️{pts}"
+        t_total = t_total.ljust(4)
+        
+        t_bonus = f"🎁{bonus_pts}"
+        t_bonus = t_bonus.ljust(3)
+
+        text += f"{t_name} | {t_pred} {t_act} {t_bonus} {t_total}\n"
 
         keyboard.append([InlineKeyboardButton(f"🔍 {th} – {ta}", callback_data=f"compare_{mid}")])
 
     conn.close()
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="my_results")])
-
-    await q.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    text += "</pre>"
+    
+    await q.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 # ---------- СРАВНЕНИЕ ----------
