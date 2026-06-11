@@ -17,7 +17,7 @@ from telegram.ext import (
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8081762922:AAExyWb5PPwE0MML5cBf26yoCy9bk6UEImE"
-ACCESS_PASSWORD = "1234"
+ACCESS_PASSWORD = "qwe123qwe"
 
 GOOGLE_SHEETS_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -29,6 +29,7 @@ MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 MATCHES_PER_PAGE = 7
 ADMIN_ID = 156845213
+BACKUP_CHAT_ID = -1003647629033
 # =============================================
 
 
@@ -92,6 +93,134 @@ async def guard(update, context):
         return True
     return False
 
+# -----------GENERATE PREDICTIONS IN CSV-------
+async def export_bets_core():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT 
+            p.user_id,
+            u.username,
+            u.first_name,
+            p.match_id,
+            m.team_home,
+            m.team_away,
+            m.match_time,
+            p.home_score,
+            p.away_score
+        FROM predictions p
+        JOIN users u ON u.user_id = p.user_id
+        JOIN matches m ON m.match_id = p.match_id
+        ORDER BY m.match_time, p.user_id
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "user_id",
+        "username",
+        "name",
+        "match_id",
+        "home_team",
+        "away_team",
+        "match_time",
+        "prediction_home",
+        "prediction_away"
+    ])
+
+    for r in rows:
+        user_id, username, first_name, match_id, th, ta, mt, ph, pa = r
+        writer.writerow([
+            user_id,
+            username or "",
+            first_name or "",
+            match_id,
+            th,
+            ta,
+            mt,
+            ph,
+            pa
+        ])
+
+    output.seek(0)
+
+    file_bytes = io.BytesIO(output.getvalue().encode("utf-8"))
+    file_bytes.name = "bets_export.csv"
+
+    return file_bytes
+
+
+# EXPORT ALL PREDICTIONS BY CALL
+async def export_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await guard(update, context):
+        return
+
+    q = update.callback_query
+    await q.answer()
+
+    if q.from_user.id != ADMIN_ID:
+        await q.message.reply_text("⛔ Нет доступа")
+        return
+
+    file_bytes = await export_bets_core()
+
+    await context.bot.send_document(
+        chat_id=q.message.chat_id,
+        document=file_bytes,
+        caption="📤 Все ставки игроков (экспорт CSV)"
+    )
+
+# ---------- BACKUP PREDICTIONS TO CHAT ----------
+async def send_prediction_backup(context, user, match_id, home, away):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT team_home, team_away, match_time
+            FROM matches
+            WHERE match_id = ?
+        """, (match_id,))
+
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            return
+
+        team_home, team_away, match_time = row
+
+        user_name = (
+            f"@{user.username}"
+            if user.username
+            else f"{user.first_name} ({user.id})"
+        )
+        
+        text = (
+            f"📥 Новая ставка\n\n"
+            f"👤 Игрок: {user_name}\n"
+            f"🆔 User ID: {user.id}\n"
+            f"⚽ Матч: {team_home} – {team_away}\n"
+            f"📅 Время: {format_match_time(match_time)}\n"
+            f"🎯 Прогноз: {home}-{away}"
+        )
+        
+        file_bytes = await export_bets_core()
+
+        await context.bot.send_document(
+            chat_id=BACKUP_CHAT_ID,
+            document=file_bytes,
+            caption=text
+        )
+
+    except Exception as e:
+        print(f"Ошибка отправки бэкапа: {e}")
+
 
 # ---------- БАЗА ----------
 def get_db():
@@ -138,7 +267,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 # ---------- GOOGLE SHEETS ----------
 def sync_matches_from_google():
     response = requests.get(GOOGLE_SHEETS_CSV_URL, timeout=10)
@@ -184,8 +312,15 @@ def main_menu(user_id: int):
         [InlineKeyboardButton("📈 Мои результаты", callback_data="my_results")],
         [InlineKeyboardButton("🏆 Рейтинг", callback_data="rating")],
     ]
+
     if user_id == ADMIN_ID:
-        keyboard.append([InlineKeyboardButton("🔄 Обновить результаты", callback_data="sync")])
+        keyboard.append([
+            InlineKeyboardButton("🔄 Обновить результаты", callback_data="sync")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📤 Распечатать все ставки", callback_data="export_bets")
+        ])
+
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -458,6 +593,14 @@ async def save_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.commit()
     conn.close()
+    
+    await send_prediction_backup(
+    context,
+    update.message.from_user,
+    mid,
+    home,
+    away
+    )
 
     context.user_data.pop("match_id")
 
@@ -745,7 +888,7 @@ def main():
     app.add_handler(CallbackQueryHandler(compare_match, pattern="^compare_"))
     app.add_handler(CallbackQueryHandler(rating, pattern="^rating$"))
     app.add_handler(CallbackQueryHandler(sync_handler, pattern="^sync$"))
-
+    app.add_handler(CallbackQueryHandler(export_bets, pattern="^export_bets$"))
     print("🤖 Бот запущен и ждёт события...")
     app.run_polling()
 
