@@ -490,21 +490,49 @@ async def show_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
+    # ---- pagination ----
+    parts = q.data.split("_")
+    page = int(parts[1]) if len(parts) > 1 else 0
+
+    offset = page * MATCHES_PER_PAGE
+
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
         SELECT DISTINCT date(match_time)
         FROM matches
         WHERE match_time >= ?
         ORDER BY date(match_time)
-    """, (now_moscow_str(),))
+        LIMIT ? OFFSET ?
+    """, (now_moscow_str(), MATCHES_PER_PAGE, offset))
+
     dates = cur.fetchall()
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT date(match_time))
+        FROM matches
+        WHERE match_time >= ?
+    """, (now_moscow_str(),))
+
+    total = cur.fetchone()[0]
     conn.close()
 
     keyboard = [
         [InlineKeyboardButton(format_date(d[0]), callback_data=f"date_{d[0]}")]
         for d in dates
     ]
+
+    # ---- navigation ----
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"dates_{page-1}"))
+
+    if offset + MATCHES_PER_PAGE < total:
+        nav.append(InlineKeyboardButton("➡️ Далее", callback_data=f"dates_{page+1}"))
+
+    if nav:
+        keyboard.append(nav)
 
     keyboard.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="back")])
 
@@ -909,7 +937,7 @@ def main():
     app.add_handler(CallbackQueryHandler(back, pattern="^back$"))
     app.add_handler(CallbackQueryHandler(matches_menu, pattern="^matches$"))
     app.add_handler(CallbackQueryHandler(show_all_matches, pattern="^all_"))
-    app.add_handler(CallbackQueryHandler(show_dates, pattern="^dates$"))
+    app.add_handler(CallbackQueryHandler(show_dates, pattern="^dates"))
     app.add_handler(CallbackQueryHandler(show_matches_by_date, pattern="^date_"))
     app.add_handler(CallbackQueryHandler(choose_match, pattern="^predict_"))
     app.add_handler(CallbackQueryHandler(my_predictions, pattern="^my_predictions$"))
