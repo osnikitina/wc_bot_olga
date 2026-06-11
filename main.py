@@ -206,6 +206,45 @@ def calculate_points(hr, ar, hp, ap):
     diff = abs(hr - hp) + abs(ar - ap)
     return max(0 - diff, MIN_POINTS)
 
+# ---------- РАСЧЕТ БОНУСОВ ----------
+def get_outcome(home_score, away_score):
+    if home_score > away_score:
+        return "H"
+    elif home_score < away_score:
+        return "A"
+    return "D"
+    
+def calculate_bonus_points(cur, match_id, hr, ar, hp, ap):
+    if hp is None or ap is None:
+        return 0
+
+    actual_outcome = get_outcome(hr, ar)
+    predicted_outcome = get_outcome(hp, ap)
+
+    # бонус только за угаданный исход
+    if predicted_outcome != actual_outcome:
+        return 0
+
+    cur.execute("""
+        SELECT home_score, away_score
+        FROM predictions
+        WHERE match_id = ?
+    """, (match_id,))
+
+    same_outcome_count = 0
+
+    for pred_home, pred_away in cur.fetchall():
+        if get_outcome(pred_home, pred_away) == actual_outcome:
+            same_outcome_count += 1
+
+    if same_outcome_count < 3:
+        return 4
+
+    if same_outcome_count < 5:
+        return 2
+
+    return 0
+
 
 # ---------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -470,19 +509,23 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("SELECT match_id, home_score, away_score FROM matches WHERE finished=1")
     matches = cur.fetchall()
 
-    total = exact = correct = wrong = 0
+    total = exact = correct = wrong = total_bonus  = 0
 
     for mid, hr, ar in matches:
         cur.execute("SELECT home_score, away_score FROM predictions WHERE user_id=? AND match_id=?", (uid, mid))
         r = cur.fetchone()
         hp, ap = r if r else (None, None)
 
-        pts = calculate_points(hr, ar, hp, ap)
+        base_pts = calculate_points(hr, ar, hp, ap)
+        bonus_pts = calculate_bonus_points(cur, mid, hr, ar, hp, ap)
+        pts = base_pts + bonus_pts 
+        #pts = calculate_points(hr, ar, hp, ap)
         total += pts
+        total_bonus += bonus_pts
 
-        if pts == 10:
+        if base_pts == 10:
             exact += 1
-        elif pts > 0:
+        elif base_pts > 0:
             correct += 1
         else:
             wrong += 1
@@ -498,6 +541,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r = cur.fetchone()
             hp, ap = r if r else (None, None)
             s += calculate_points(hr, ar, hp, ap)
+            s += calculate_bonus_points(cur, mid, hr, ar, hp, ap)
         scores.append((u, s))
 
     scores.sort(key=lambda x: x[1], reverse=True)
@@ -506,7 +550,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     text = (
-        f"📊 Твой рейтинг: {place} место — {total} очков\n\n"
+        f"📊 Твой рейтинг: {place} место — {total} очков (из них {total_bonus} бонусных)\n\n"
         f"✅ Точные прогнозы: {exact}\n"
         f"⚽ Правильный исход: {correct}\n"
         f"❌ Неправильный исход: {wrong}"
@@ -540,22 +584,29 @@ async def my_results_matches(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ORDER BY m.match_time
     """, (uid,))
     rows = cur.fetchall()
-    conn.close()
+
 
     text = "📊 Твои матчи и очки:\n\n"
     keyboard = []
 
     for i, r in enumerate(rows, 1):
         mid, th, ta, hr, ar, hp, ap = r
-        pts = calculate_points(hr, ar, hp, ap)
-        icon = "✅" if pts == 10 else "⚽" if pts > 0 else "❌"
+
+        base_pts = calculate_points(hr, ar, hp, ap)
+        bonus_pts = calculate_bonus_points(cur, mid, hr, ar, hp, ap)
+        pts = base_pts + bonus_pts          
+        #pts = calculate_points(hr, ar, hp, ap)
+        
+        icon = "✅" if base_pts == 10 else "⚽" if base_pts > 0 else "❌"
 
         hp_text = f"{hp}" if hp is not None else "-"
         ap_text = f"{ap}" if ap is not None else "-"
 
-        text += f"{i}. {th} – {ta}\nТвой прогноз: {hp_text}-{ap_text}\nРезультат: {hr}-{ar} {icon}\nОчки: {pts}\n\n"
+        text += f"{i}. {th} – {ta}\nТвой прогноз: {hp_text}-{ap_text}\nРезультат: {hr}-{ar} {icon}\nОчки: {pts} (из них {bonus_pts} бонусы)\n\n"
 
         keyboard.append([InlineKeyboardButton(f"🔍 {th} – {ta}", callback_data=f"compare_{mid}")])
+
+    conn.close()
 
     keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="my_results")])
 
@@ -582,19 +633,25 @@ async def compare_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LEFT JOIN predictions p ON u.user_id=p.user_id AND p.match_id=?
     """, (mid,))
     rows = cur.fetchall()
-    conn.close()
 
     text = f"{th} – {ta}\nИтог: {hr}-{ar}\n\n"
 
     for u, f, hp, ap in rows:
         name = f"@{u}" if u else (f or "без имени")
-        pts = calculate_points(hr, ar, hp, ap)
-        icon = "✅" if pts == 10 else "⚽" if pts > 0 else "❌"
+        
+        base_pts = calculate_points(hr, ar, hp, ap)
+        bonus_pts = calculate_bonus_points(cur, mid, hr, ar, hp, ap)
+        pts = base_pts + bonus_pts        
+        #pts = calculate_points(hr, ar, hp, ap)
+
+        icon = "✅" if base_pts == 10 else "⚽" if base_pts > 0 else "❌"
 
         if hp is None:
             text += f"{name}: — {icon} {pts}\n"
         else:
             text += f"{name}: {hp}-{ap} {icon} {pts}\n"
+
+    conn.close()
 
     await q.message.reply_text(text, reply_markup=back_button())
 
@@ -613,7 +670,6 @@ async def rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cur.execute("SELECT match_id, home_score, away_score FROM matches WHERE finished=1")
     matches = cur.fetchall()
-    conn.close()
 
     ranking = []
 
@@ -621,21 +677,28 @@ async def rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pts = exact = 0
 
         for mid, hr, ar in matches:
-            conn = get_db()
-            cur = conn.cursor()
+            #conn_match  = get_db()
+            #cur = conn_match .cursor()
             cur.execute("SELECT home_score, away_score FROM predictions WHERE user_id=? AND match_id=?", (uid, mid))
             r = cur.fetchone()
-            conn.close()
 
             hp, ap = r if r else (None, None)
-            p = calculate_points(hr, ar, hp, ap)
+            
+            base_pts = calculate_points(hr, ar, hp, ap)
+            bonus_pts = calculate_bonus_points(cur, mid, hr, ar, hp, ap)
+            p = base_pts + bonus_pts
+            #p = calculate_points(hr, ar, hp, ap)
+
+            #conn_match .close()
 
             pts += p
-            if p == 10:
+            if base_pts == 10:
                 exact += 1
 
         name = f"@{u}" if u else (f or "без имени")
         ranking.append((name, pts, exact))
+
+    conn.close()
 
     ranking.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
