@@ -16,8 +16,8 @@ from telegram.ext import (
 )
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8081762922:AAExyWb5PPwE0MML5cBf26yoCy9bk6UEImE"
-ACCESS_PASSWORD = "qwe123qwe"
+BOT_TOKEN = "8081761922:AAHuJGYVc4aTB8ad_sScZk3O7VRvtmtx_12"
+ACCESS_PASSWORD = "db88e9aa-8e68-4d11-b6ea-b3c79f8b8a92"
 
 GOOGLE_SHEETS_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
@@ -28,6 +28,7 @@ DB_NAME = "bot.db"
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 MATCHES_PER_PAGE = 7
+RESULTS_PER_PAGE = 10
 ADMIN_ID = 156845213
 BACKUP_CHAT_ID = -1003647629033
 REMINDER_TIME_MSK = "12:00"
@@ -788,7 +789,11 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             wrong += 1
 
-    cur.execute("SELECT user_id FROM users")
+    cur.execute("""
+    SELECT user_id
+    FROM users
+    WHERE is_authorized = 1
+    """)
     users = [u[0] for u in cur.fetchall()]
 
     scores = []
@@ -815,7 +820,7 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Матчи и очки", callback_data="my_results_matches")],
+        [InlineKeyboardButton("📋 Матчи и очки", callback_data="my_results_matches_0")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="back")]
     ])
 
@@ -824,69 +829,115 @@ async def my_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- МОИ МАТЧИ С ОЧКАМИ ----------
 async def my_results_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await guard(update, context): return
+    if await guard(update, context):
+        return
+
     q = update.callback_query
     await q.answer()
 
     uid = q.from_user.id
 
+    parts = q.data.split("_")
+    page = int(parts[3]) if len(parts) == 4 else 0
+
+    offset = page * RESULTS_PER_PAGE
+
     conn = get_db()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT m.match_id, m.team_home, m.team_away, m.home_score, m.away_score,
-               p.home_score, p.away_score
-        FROM matches m
-        LEFT JOIN predictions p ON m.match_id=p.match_id AND p.user_id=?
-        WHERE m.finished=1
-        ORDER BY m.match_time
-    """, (uid,))
-    rows = cur.fetchall()
+        SELECT COUNT(*)
+        FROM matches
+        WHERE finished=1
+    """)
+    total = cur.fetchone()[0]
 
+    cur.execute("""
+        SELECT
+            m.match_id,
+            m.team_home,
+            m.team_away,
+            m.home_score,
+            m.away_score,
+            p.home_score,
+            p.away_score
+        FROM matches m
+        LEFT JOIN predictions p
+            ON m.match_id = p.match_id
+           AND p.user_id = ?
+        WHERE m.finished = 1
+        ORDER BY m.match_time DESC
+        LIMIT ? OFFSET ?
+    """, (uid, RESULTS_PER_PAGE, offset))
+
+    rows = cur.fetchall()
 
     text = "📊 Твои матчи и очки:\n\n<pre>"
     keyboard = []
 
-    for i, r in enumerate(rows, 1):
+    for r in rows:
+
         mid, th, ta, hr, ar, hp, ap = r
 
         base_pts = calculate_points(hr, ar, hp, ap)
         bonus_pts = calculate_bonus_points(cur, mid, hr, ar, hp, ap)
-        pts = base_pts + bonus_pts          
-        #pts = calculate_points(hr, ar, hp, ap)
-        
-        icon = "✅" if base_pts == 10 else "⚽" if base_pts > 0 else "❌"
+        pts = base_pts + bonus_pts
 
-        hp_text = f"{hp}" if hp is not None else "-"
-        ap_text = f"{ap}" if ap is not None else "-"
+        hp_text = str(hp) if hp is not None else "-"
+        ap_text = str(ap) if ap is not None else "-"
 
-        #text += f"{i}. {th} – {ta}\nТвой прогноз: {hp_text}-{ap_text}\nРезультат: {hr}-{ar} {icon}\nОчки: {pts} (из них {bonus_pts} бонусы)\n\n"
-        t_name = f"{th} – {ta}"
-        t_name = t_name.ljust(42)
-        
-        t_pred = f"🎯{hp_text}-{ap_text}"
-        t_pred = t_pred.ljust(7)
-        
-        t_act = f"⚽️{hr}-{ar}"
-        t_act = t_act.ljust(7)
-        
-        t_total = f"⭐️{pts}"
-        t_total = t_total.ljust(4)
-        
-        t_bonus = f"🎁{bonus_pts}"
-        t_bonus = t_bonus.ljust(3)
+        t_name = f"{th} – {ta}".ljust(42)
+        t_pred = f"🎯{hp_text}-{ap_text}".ljust(7)
+        t_act = f"⚽️{hr}-{ar}".ljust(7)
+        t_total = f"⭐️{pts}".ljust(4)
+        t_bonus = f"🎁{bonus_pts}".ljust(3)
 
         text += f"{t_name} | {t_pred} {t_act} {t_bonus} {t_total}\n"
 
-        keyboard.append([InlineKeyboardButton(f"🔍 {th} – {ta}", callback_data=f"compare_{mid}")])
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🔍 {th} – {ta}",
+                callback_data=f"compare_{mid}"
+            )
+        ])
 
     conn.close()
 
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="my_results")])
     text += "</pre>"
-    
-    await q.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
+    nav = []
+
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"my_results_matches_{page-1}"
+            )
+        )
+
+    if offset + RESULTS_PER_PAGE < total:
+        nav.append(
+            InlineKeyboardButton(
+                "➡️ Далее",
+                callback_data=f"my_results_matches_{page+1}"
+            )
+        )
+
+    if nav:
+        keyboard.append(nav)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "⬅️ Назад",
+            callback_data="my_results"
+        )
+    ])
+
+    await q.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # ---------- СРАВНЕНИЕ ----------
 async def compare_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -940,7 +991,14 @@ async def rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("SELECT user_id, username, first_name FROM users")
+    cur.execute("""
+    SELECT
+        user_id,
+        username,
+        first_name
+    FROM users
+    WHERE is_authorized = 1
+    """)
     users = cur.fetchall()
 
     cur.execute("SELECT match_id, home_score, away_score FROM matches WHERE finished=1")
@@ -1016,7 +1074,7 @@ def main():
     app.add_handler(CallbackQueryHandler(choose_match, pattern="^predict_"))
     app.add_handler(CallbackQueryHandler(my_predictions, pattern="^my_predictions$"))
     app.add_handler(CallbackQueryHandler(my_results, pattern="^my_results$"))
-    app.add_handler(CallbackQueryHandler(my_results_matches, pattern="^my_results_matches$"))
+    app.add_handler(CallbackQueryHandler(my_results_matches, pattern="^my_results_matches"))
     app.add_handler(CallbackQueryHandler(compare_match, pattern="^compare_"))
     app.add_handler(CallbackQueryHandler(rating, pattern="^rating$"))
     app.add_handler(CallbackQueryHandler(sync_handler, pattern="^sync$"))
