@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8081761922:AAHuJGYVc4aTB8ad_sScZk3O7VRvtmtx_12"
+BOT_TOKEN = "8081162922:AAHuJGYVc1aTB8ad_sScZk317VRvtmtx_JY"
 ACCESS_PASSWORD = "db88e9aa-8e68-4d11-b6ea-b3c79f8b8a92"
 
 GOOGLE_SHEETS_CSV_URL = (
@@ -957,6 +957,7 @@ async def compare_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SELECT u.username, u.first_name, p.home_score, p.away_score
         FROM users u
         LEFT JOIN predictions p ON u.user_id=p.user_id AND p.match_id=?
+        where u.is_authorized = 1
     """, (mid,))
     rows = cur.fetchall()
 
